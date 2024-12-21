@@ -1,0 +1,298 @@
+#%% Import packages
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
+import geopandas as gpd
+
+import rasterio 
+from rasterio.enums import Resampling
+from rasterio.features import rasterize
+from rasterio.warp import reproject
+
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+from sklearn.svm import SVC
+from sklearn.neural_network import MLPClassifier
+from sklearn.metrics import classification_report
+from sklearn.metrics import f1_score
+from sklearn.metrics import precision_score
+from sklearn.metrics import recall_score
+
+#%% Working directory for the different areas
+wdir_1 = "C:/Users/sieta/Desktop/Uni/Advanced spatial analysis/Assignments/Spatial/Flood delineation/Rockhampton_data/"
+wdir_2 = "C:/Users/sieta/Desktop/Uni/Advanced spatial analysis/Assignments/Spatial/Flood delineation/Georgina_river_data/"
+
+#%% Visualise, resample and save satellite image
+#file path for the satellite image - choose the region
+#image_file = f"{wdir_1}S2A_MSIL2A_20170408T001211_N0500_R073_T56KKV_20230902T023055.SAFE/GRANULE/L2A_T56KKV_A009365_20170408T001211/IMG_DATA/R20m/T56KKV_20170408T001211_TCI_20m.jp2"
+image_file = f"{wdir_2}S2A_MSIL2A_20230313T005701_N0509_R002_T53KRS_20230313T032857.SAFE/S2A_MSIL2A_20230313T005701_N0509_R002_T53KRS_20230313T032857.SAFE/GRANULE/L2A_T53KRS_A040325_20230313T010236/IMG_DATA/R20m/T53KRS_20230313T005701_TCI_20m.jp2"
+
+scale_factor = 0.05     #adjust for higher or lower resolution --> higher resolution means slower processing
+
+#function for resampling
+def resample_image(image_file, scale_factor): 
+    ''' Ópen the satellte image and rescale it with the the scale factor'''
+    with rasterio.open(image_file) as src:
+        data = src.read(out_shape=(src.count, int(src.height*scale_factor), int(src.width*scale_factor)), resampling=Resampling.bilinear)
+        resample = src.transform * src.transform.scale((src.width / data.shape[2]), (src.height / data.shape[1]))
+    return data, resample
+
+image_data, image_resample = resample_image(image_file, scale_factor=scale_factor)   #calling the function
+
+#visualise the new resampled image
+plt.figure(figsize=(10, 10))
+plt.title("Rockhampton flood - Scale factor = 0.05", fontsize=14)
+plt.axis("off")
+plt.imshow(np.transpose(image_data, (1, 2, 0)))    #rearrange the dimensions from (RGB-bands, height, width) to (height, width, RGB-bands) so the image is properly shown
+plt.show()
+
+#function for saving the resampled image 
+def save_resampled_image(image_data, transform, crs, resample_file):
+    # Define metadata for the output file
+    metadata = {"driver": "GTiff", "height": image_data.shape[1], "width": image_data.shape[2], "count": image_data.shape[0], "dtype": image_data.dtype.name, "crs": crs, "transform": transform}
+    
+    # Write the resampled image to a GeoTIFF file
+    with rasterio.open(resample_file, "w", **metadata) as dst:
+        for band in range(image_data.shape[0]):
+            dst.write(image_data[band], band + 1)
+            
+# File path to save the image
+resample_file = f"{wdir_1}Rockhampton_Flood_Resampled.tif"   
+
+# Save the resampled image
+with rasterio.open(image_file) as src:
+    save_resampled_image(image_data, image_resample, src.crs, resample_file)
+
+
+#%% Sampling ground truth data
+''' Flooded = 1 and not flooded = 0 '''
+
+#open the vector data witht the pints tht are flooded/not flooded
+flooded_points_file = f"{wdir_2}flooded_points.geojson"
+flooded_points = gpd.read_file(flooded_points_file)
+
+#create a array filled with 0's with the size of the points and bands; flooded_points is the row and 3 (the bands) are the columns
+X_RGB_values = np.zeros((len(flooded_points), 3))  #x variable = RGB bands per pixe
+
+with rasterio.open(resample_file) as src:
+    # Extract raster values for each point in the ground truth shapefile
+    coords = [(x, y) for x, y in zip(flooded_points.geometry.x, flooded_points.geometry.y)]
+    # for every point, sample from the raster image and store the values in the array
+    for idx, value in enumerate(src.sample(coords)):
+        X_RGB_values[idx] = value
+
+#Convert the flooded column from flooded_points into a numpy array
+Y_flooded = flooded_points["flooded"].values    #y variable = flooded/not flooded
+data_flooded_RGB = np.column_stack((X_RGB_values, Y_flooded))
+
+#%% Machine learning
+# specify X anf Y for the training and testing set
+X = X_RGB_values
+Y = Y_flooded
+
+#split up the data in a train and test set
+X_train, X_test, Y_train, Y_test = train_test_split(X, Y, test_size=0.2, stratify=Y, random_state=42)
+
+''' 
+Machine Learning Algorithms = LMA 
+First we train, then we predict and last we evaluate for the different classification methods
+'''
+#LMA1: Random Forest Classifier (RFC)
+RFC = RandomForestClassifier()
+RFC.fit(X_train, Y_train)
+
+RFC_prediction = RFC.predict(X_test)
+
+print("Classification report for RFC")
+print(classification_report(Y_test, RFC_prediction))
+
+#LMA2: Logistic Regression Classifer (LRC)
+LRC = LogisticRegression()
+LRC.fit(X_train, Y_train)
+
+LRC_prediction = LRC.predict(X_test)
+print("Classification report for LRC")
+print(classification_report(Y_test, LRC_prediction))
+
+#LMA3: Support Vector Classifer (SVC)
+SVC = SVC()
+SVC.fit(X_train, Y_train)
+
+SVC_prediction = SVC.predict(X_test)
+print("Classification report for SVC")
+print(classification_report(Y_test, SVC_prediction))
+
+#LMA4: Multi-Layer Perceptron (MLP)
+MLP = MLPClassifier()
+MLP.fit(X_train, Y_train)
+
+MLP_prediction = MLP.predict(X_test)
+print("Classification report for SVC")
+print(classification_report(Y_test, MLP_prediction))
+
+#%% Apply the classifier to the entire image
+#read the amount of bands, rows and columns to later reshape the image
+bands, rows, cols = image_data.shape
+
+# rshape the image to fit the image, apply the chosen classifier and reshape the prediction to the original dimensions
+reshaped_image_data = image_data.reshape((bands, -1)).T 
+flood_predictions = LRC.predict(reshaped_image_data)  
+flood_mask = flood_predictions.reshape((rows, cols))
+
+predicted_flood_mask_path = f"{wdir_2}predicted_flood_mask.tif"
+#
+with rasterio.open(predicted_flood_mask_path, "w", driver="GTiff", height=flood_mask.shape[0], width=flood_mask.shape[1], count=1, dtype=flood_mask.dtype, crs=src.crs, transform=src.transform) as dst:  
+    dst.write(flood_mask, 1)
+
+#visualise the predicted flood mask
+plt.figure(figsize=(8, 8))
+plt.title("Predicted flood mask", fontsize=14)
+plt.imshow(flood_mask, cmap="Blues")  
+plt.axis("off")
+
+#set the elements of the legend
+legend_elements = [Patch(facecolor='aliceblue', edgecolor='black', label='Not flooded'), Patch(facecolor='darkblue', edgecolor='black', label='flooded')]
+
+#set the location of the legend, place flooded and not flooded next to each other and specify the font size
+plt.legend(handles=legend_elements, loc='lower center', bbox_to_anchor=(0.5, -0.1), ncol=2, fontsize=14)
+
+plt.tight_layout()
+plt.show()
+
+#%% Loading Ground Truth Polygons
+flooded_polygon_file = f"{wdir_2}flooded_polygon.geojson"  
+flooded_polygon = gpd.read_file(flooded_polygon_file)
+
+flooded_polygon["class"] = 1  
+
+with rasterio.open(predicted_flood_mask_path) as src:
+    transform = src.transform  
+    crs = src.crs 
+    rows, cols = src.height, src.width 
+
+#convert vector data to raster with rasterised - flooded = 1 and not flooded = 0
+rasterised_polygons = rasterize([(geom, 1) for geom in flooded_polygon.geometry], out_shape=(rows, cols), transform=transform, fill=0, dtype="uint8")
+
+# visualise
+plt.figure(figsize=(8, 8))
+plt.imshow(rasterised_polygons, cmap="Blues")
+plt.title("Polygon of the floods", fontsize=14)
+plt.axis("off")
+
+#set the elements of the legend like before
+legend_elements = [Patch(facecolor='aliceblue', edgecolor='black', label='Not flooded'), Patch(facecolor='darkblue', edgecolor='black', label='flooded')]
+plt.legend(handles=legend_elements, loc='lower center', bbox_to_anchor=(0.5, -0.1), ncol=2, fontsize=14)
+
+plt.tight_layout()
+plt.show()
+
+#create an array filled with 0's
+predicted_resampled = np.zeros_like(rasterised_polygons)  
+
+#resample predicted flooded mask into the array (predicted_resampled)
+with rasterio.open(predicted_flood_mask_path) as src:
+    reproject(flood_mask, predicted_resampled, src_transform=src.transform, src_crs=src.crs, dst_transform=transform, dst_crs=src.crs, resampling=Resampling.nearest)
+
+#%% Evaluating the clasifier preformance against polygons 
+#convert the 2D arrays into 1D arrays, or 'flatten' them, to be able to use them for evaluation
+ground_truth_flat = rasterised_polygons.flatten()
+predicted_flat = predicted_resampled.flatten()
+
+#calculate the precision, recall and F1-score metrtics 
+precision = precision_score(ground_truth_flat, predicted_flat)
+recall = recall_score(ground_truth_flat, predicted_flat)
+f1 = f1_score(ground_truth_flat, predicted_flat)
+
+#print a report of the metrics
+print("Evalutation")
+print(f"Precision = {precision}")
+print(f"Recall = {recall}")
+print(f"F1-Score = {f1}")
+
+#visualise the polygon and floodmask alongside each other to compare
+plt.figure(figsize=(10, 8))
+
+plt.subplot(1, 2, 1)
+plt.title("Polygon of the flood", fontsize=14)
+plt.imshow(rasterised_polygons, cmap="Blues")
+plt.axis("off")
+
+plt.subplot(1, 2, 2)
+plt.title("Predicted flood mask", fontsize=14)
+plt.imshow(predicted_resampled, cmap="Blues")
+plt.axis("off")
+
+#set the elements of the legend like before
+legend_elements = [Patch(facecolor='aliceblue', edgecolor='black', label='Not flooded'), Patch(facecolor='darkblue', edgecolor='black', label='flooded')]
+plt.gcf().legend(handles=legend_elements, loc='lower center', bbox_to_anchor=(0.5, -0.01), ncol=2, fontsize=14)
+
+plt.tight_layout()
+plt.show()
+
+#%% Apply classifier to a different image
+#file path for the satellite image and the polygon
+#image_file_new = f"{wdir_2}S2A_MSIL2A_20230313T005701_N0509_R002_T53KRS_20230313T032857.SAFE\S2A_MSIL2A_20230313T005701_N0509_R002_T53KRS_20230313T032857.SAFE\GRANULE\L2A_T53KRS_A040325_20230313T010236\IMG_DATA\R20m\T53KRS_20230313T005701_TCI_20m.jp2"
+image_file_new = f"{wdir_1}S2A_MSIL2A_20170408T001211_N0500_R073_T56KKV_20230902T023055.SAFE/GRANULE/L2A_T56KKV_A009365_20170408T001211/IMG_DATA/R20m/T56KKV_20170408T001211_TCI_20m.jp2"
+
+# formula for resampling the new image
+def resample_image_new(image_file_new, scale_factor=1):
+    with rasterio.open(image_file_new) as src:
+        image_data = src.read(out_shape=(src.count, int(src.height * scale_factor), int(src.width * scale_factor)), resampling=rasterio.enums.Resampling.bilinear)
+        transform = src.transform
+        crs = src.crs
+    return image_data, transform, crs
+
+#Call the function
+new_image_data, new_transform, new_crs = resample_image_new(image_file_new)
+
+# reshape
+bands, rows, cols = new_image_data.shape
+reshaped_new_image_data = new_image_data.reshape((bands, -1)).T  
+
+#apply the classifier
+new_flood_predictions = LRC.predict(reshaped_new_image_data)
+new_flood_mask = new_flood_predictions.reshape((rows, cols))  
+
+#load the new polygon for the new image
+flooded_polygon_new = f"{wdir_1}flooded_polygon.geojson"
+new_ground_truth_polygons = gpd.read_file(flooded_polygon_new)
+new_ground_truth_polygons = new_ground_truth_polygons.to_crs(new_crs)  
+
+#rasterise - flooded = 1 and not flooded = 0
+new_ground_truth_raster = rasterize([(geom, 1) for geom in new_ground_truth_polygons.geometry], out_shape=(rows, cols), transform=new_transform, fill=0,dtype="uint8")
+
+# convert the 2D arrays into 1D arrays
+ground_truth_flat = new_ground_truth_raster.flatten()
+predicted_flat = new_flood_mask.flatten()
+
+#calculate the precision, recall and F1-score metrtics 
+precision = precision_score(ground_truth_flat, predicted_flat)
+recall = recall_score(ground_truth_flat, predicted_flat)
+f1 = f1_score(ground_truth_flat, predicted_flat)
+
+#print a report of the metrics
+print("Evaluation")
+print(f"Precision = {precision}")
+print(f"Recall = {recall}")
+print(f"F1-Score = {f1}")
+
+#visualise the polygon and floodmask alongside each other to compare
+plt.figure(figsize=(10, 8))
+
+plt.subplot(1, 2, 1)
+plt.title("Polygon of the flood", fontsize=14)
+plt.imshow(new_ground_truth_raster, cmap="Blues")
+plt.axis("off")
+
+plt.subplot(1, 2, 2)
+plt.title("Predicted flood mask", fontsize=14)
+plt.imshow(new_flood_mask, cmap="Blues")
+plt.axis("off")
+
+#set the elements of the legend like before
+legend_elements = [Patch(facecolor='aliceblue', edgecolor='black', label='Not flooded'), Patch(facecolor='darkblue', edgecolor='black', label='flooded')]
+plt.gcf().legend(handles=legend_elements, loc='lower center', bbox_to_anchor=(0.5, -0.01), ncol=2, fontsize=14)
+
+plt.tight_layout()
+plt.show()
